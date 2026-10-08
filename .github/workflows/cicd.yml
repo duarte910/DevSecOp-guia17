@@ -1,10 +1,9 @@
 # ============================================
-# cicd.yml — Pipeline completo CI/CD con Trivy Security (3 Fases)
+# cicd.yml — Pipeline completo CI/CD con Trivy, Semgrep y Gitleaks (3 Fases)
 # ============================================
 
-name: CI/CD Pipeline - Notes App con Trivy Security (3 Fases)
+name: CI/CD Pipeline - Notes App DevSecOps (3 Fases)
 
-# ── Triggers unificados ───────────────────────────────────
 on:
   push:
     branches:
@@ -16,16 +15,17 @@ on:
       - main
       - develop
 
-# ── Variables globales unificadas ─────────────────────────
+permissions:
+  contents: read
+  security-events: write
+
 env:
   DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/devops-portfolio
   PYTHON_VERSION: "3.12"
   HELM_RELEASE_NAME: mi-app
   K8S_NAMESPACE: devops-portfolio
 
-# ── Jobs ──────────────────────────────────────────────────
 jobs:
-
   # ── Job 1: Lint ────────────────────────────────────────
   lint:
     name: Lint
@@ -62,7 +62,6 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     needs: lint   # solo corre si lint pasa
-
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
@@ -155,9 +154,163 @@ jobs:
           path: build-artifacts/app-image.tar
           retention-days: 1
 
-  # ── FASE 2A: AUDITORÍA DE SEGURIDAD - ANDON CORD ────────
+  # ── FASE 2: SEMGREP SAST SCAN ───────────────────────────
+  semgrep-scan:
+    name: "Fase 2: Semgrep SAST Scan"
+    runs-on: ubuntu-latest
+    needs: [build-and-package]
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar Semgrep
+        run: python3 -m pip install semgrep
+
+      - name: Renderizar Helm para el análisis
+        run: |
+          mkdir -p .semgrep-tmp
+          helm template tp15 devops-tp12/chart \
+            -f devops-tp12/values-local.yaml \
+            > .semgrep-tmp/helm-rendered.yaml
+
+      - name: Ejecutar Semgrep y generar JSON
+        run: |
+          semgrep scan \
+            --config=p/owasp-top-ten \
+            --config=p/python \
+            --config=p/dockerfile \
+            --config=p/terraform \
+            --config=p/kubernetes \
+            --json --output=semgrep-results.json \
+            devops-tp12/app \
+            devops-tp12/monitoring-k8s-manifests.yaml \
+            guia-11 .semgrep-tmp || true
+
+      - name: Resumen de Auditoría SAST
+        if: always()
+        shell: bash
+        run: |
+          test -s semgrep-results.json || printf '{"results":[],"errors":[]}' > semgrep-results.json
+          total=$(jq '.results | length' semgrep-results.json)
+          errores=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-results.json)
+          warnings=$(jq '[.results[] | select(.extra.severity == "WARNING")] | length' semgrep-results.json)
+          errores_scan=$(jq '.errors | length' semgrep-results.json)
+          {
+            echo "### Reporte de Análisis Estático SAST (Semgrep)"
+            echo
+            echo "| Capa auditada | Reglas aplicadas | Estado |"
+            echo "|---|---|---|"
+            echo "| Backend Python | OWASP Top 10 + Python | Completado |"
+            echo "| Contenedores | Dockerfile | Completado |"
+            echo "| IaC | Terraform | Completado |"
+            echo "| Orquestación | Kubernetes + Helm/YAML | Completado |"
+            echo
+            echo "Hallazgos: **${total}**; ERROR: **${errores}**; WARNING: **${warnings}**."
+            echo "Incidencias del analizador: **${errores_scan}**."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir artefacto de resultados
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-results.json
+          retention-days: 7
+
+      - name: Generar reporte SARIF
+        run: |
+          semgrep scan --config=auto \
+            --sarif --output=semgrep.sarif \
+            devops-tp12/app \
+            devops-tp12/monitoring-k8s-manifests.yaml \
+            guia-11 .semgrep-tmp || true
+
+      - name: Cargar resultados a GitHub Code Scanning
+        if: always() && hashFiles('semgrep.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+      - name: Guard estricto de seguridad (Andon Cord)
+        run: |
+          semgrep scan --config=p/owasp-top-ten \
+            --severity=ERROR --error \
+            devops-tp12/app \
+            devops-tp12/chart \
+            devops-tp12/monitoring-k8s-manifests.yaml \
+            guia-11
+
+  # ── FASE 2: GITLEAKS - ANDON CORD ───────────────────────
+  gitleaks-andon-cord:
+    name: "Fase 2: Gitleaks - Andon Cord (Secret Detection)"
+    runs-on: ubuntu-latest
+    needs: [build-and-package]
+    steps:
+      - name: Checkout del código (Historial completo para análisis)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # OBLIGATORIO: Descarga todo el historial de commits
+
+      - name: Escaneo de Secretos con Gitleaks Action
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+
+      - name: Resumen de Andon Cord en GitHub
+        if: always()
+        run: |
+          echo "### Auditoría de Secretos (Gitleaks) :key:" >> $GITHUB_STEP_SUMMARY
+          echo "| Evaluación | Tipo de Control | Acción en Pipeline |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|-----------------|--------------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Fuga de Secretos** |  **Andon Cord Activo** | Bloquea el merge si se detectan credenciales |" >> $GITHUB_STEP_SUMMARY
+
+  # ── FASE 2: GITLEAKS - REPORTE DE INSPECCIÓN ────────────
+  gitleaks-audit-report:
+    name: "Fase 2: Gitleaks - Reporte e Inspección (Artifacts)"
+    runs-on: ubuntu-latest
+    needs: [build-and-package, gitleaks-andon-cord]
+    if: always()
+    steps:
+      - name: Checkout del código (Historial completo)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Instalación de Gitleaks CLI
+        run: |
+          wget https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz
+          tar -xzf gitleaks_8.18.2_linux_x64.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Generar Reporte de Auditoría en JSON
+        run: |
+          gitleaks detect --source . --report-format json --report-path gitleaks-report.json || true
+
+      - name: Publicar Artifact de Auditoría de Secretos
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-fuga-secretos-gitleaks
+          path: gitleaks-report.json
+          retention-days: 14
+
+      - name: Publicar Resumen en $GITHUB_STEP_SUMMARY
+        run: |
+          echo "### Reporte de Inspección de Secretos (Gitleaks) :clipboard:" >> $GITHUB_STEP_SUMMARY
+          echo "El informe JSON detallado de auditoría de Git se ha adjuntado como **Artifact**." >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          head -n 30 gitleaks-report.json || echo "[]" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # ── FASE 2: TRIVY - ANDON CORD ──────────────────────────
   trivy-andon-cord:
-    name: "Fase 2A: Trivy - Andon Cord (HIGH/CRITICAL)"
+    name: "Fase 2: Trivy - Andon Cord (HIGH/CRITICAL)"
     runs-on: ubuntu-latest
     needs: [build-and-package]
     steps:
@@ -210,9 +363,9 @@ jobs:
           echo "|------------|-------------|---------------------|" >> $GITHUB_STEP_SUMMARY
           echo "| **Contenedor, SCA e IaC** | \`HIGH, CRITICAL\` | **Andon Cord Activo** |" >> $GITHUB_STEP_SUMMARY
 
-  # ── FASE 2B: AUDITORÍA INFORMATIVA (LOW/MEDIUM) ─────────
+  # ── FASE 2: TRIVY - REPORTE DE INSPECCIÓN ───────────────
   trivy-audit-report:
-    name: "Fase 2B: Trivy - Reporte e Inspección (LOW/MEDIUM)"
+    name: "Fase 2: Trivy - Reporte e Inspección (LOW/MEDIUM)"
     runs-on: ubuntu-latest
     needs: [build-and-package, trivy-andon-cord]
     if: always()
@@ -258,7 +411,7 @@ jobs:
   deploy-k8s-helm:
     name: "Fase 3: Release & Deploy Helm K8s"
     runs-on: ubuntu-latest
-    needs: [build-and-package, trivy-andon-cord, trivy-audit-report]
+    needs: [build-and-package, trivy-andon-cord, trivy-audit-report, semgrep-scan, gitleaks-andon-cord, gitleaks-audit-report]
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Checkout del código
@@ -282,7 +435,7 @@ jobs:
 
       - name: Etiquetar y Push a Docker Hub
         run: |
-          docker tag ${{ env.DOCKER_IMAGE }}:${{ github.sha }} ${{ env.DOCKER_IMAGE }}:latest
+          docker tag ${{ env.DOCKER_IMAGE }}:${{ github.sha }}${{ env.DOCKER_IMAGE }}:latest
           docker push ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
           docker push ${{ env.DOCKER_IMAGE }}:latest
 
