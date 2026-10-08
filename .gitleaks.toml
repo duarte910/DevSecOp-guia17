@@ -1,0 +1,14 @@
+# Archivo de configuración personalizada: .gitleaks.toml
+[config]
+title = "Gitleaks Config - Notes App DevSecOps"
+
+[allowlist]
+description = "Permitir archivos de prueba y variables de test conocidas"
+paths = [
+  '''backend/tests/.*''',
+  '''scripts/verificar.*\.sh'''
+]
+regexes = [
+  '''EXAMPLEKEY''',
+  '''devops123'''
+]
