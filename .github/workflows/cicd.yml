@@ -255,7 +255,7 @@ jobs:
       - name: Checkout del código (Historial completo para análisis)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # OBLIGATORIO: Descarga todo el historial de commits
+          fetch-depth: 0  # OBLIGATORIO: Descarga todo el historial de commits
 
       - name: Escaneo de Secretos con Gitleaks Action
         uses: gitleaks/gitleaks-action@v2
@@ -269,7 +269,7 @@ jobs:
           echo "### Auditoría de Secretos (Gitleaks) :key:" >> $GITHUB_STEP_SUMMARY
           echo "| Evaluación | Tipo de Control | Acción en Pipeline |" >> $GITHUB_STEP_SUMMARY
           echo "|------------|-----------------|--------------------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Fuga de Secretos** |  **Andon Cord Activo** | Bloquea el merge si se detectan credenciales |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Fuga de Secretos** | **Andon Cord Activo** | Bloquea merge si hay claves |" >> $GITHUB_STEP_SUMMARY
 
   # ── FASE 2: GITLEAKS - REPORTE DE INSPECCIÓN ────────────
   gitleaks-audit-report:
@@ -303,7 +303,7 @@ jobs:
       - name: Publicar Resumen en $GITHUB_STEP_SUMMARY
         run: |
           echo "### Reporte de Inspección de Secretos (Gitleaks) :clipboard:" >> $GITHUB_STEP_SUMMARY
-          echo "El informe JSON detallado de auditoría de Git se ha adjuntado como **Artifact**." >> $GITHUB_STEP_SUMMARY
+          echo "El informe JSON de auditoría de Git se adjuntó como **Artifact**." >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
           head -n 30 gitleaks-report.json || echo "[]" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
@@ -411,7 +411,13 @@ jobs:
   deploy-k8s-helm:
     name: "Fase 3: Release & Deploy Helm K8s"
     runs-on: ubuntu-latest
-    needs: [build-and-package, trivy-andon-cord, trivy-audit-report, semgrep-scan, gitleaks-andon-cord, gitleaks-audit-report]
+    needs:
+      - build-and-package
+      - trivy-andon-cord
+      - trivy-audit-report
+      - semgrep-scan
+      - gitleaks-andon-cord
+      - gitleaks-audit-report
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Checkout del código
