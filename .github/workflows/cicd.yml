@@ -146,7 +146,9 @@ jobs:
       - name: Exportar imagen a tarball efímero
         run: |
           mkdir -p build-artifacts
-          docker save ${{ env.DOCKER_IMAGE }}:${{ github.sha }} notes-frontend:${{ github.sha }} -o build-artifacts/app-image.tar
+          docker save ${{ env.DOCKER_IMAGE }}:${{ github.sha }} \
+            notes-frontend:${{ github.sha }} \
+            -o build-artifacts/app-image.tar
 
       - name: Publicar Artefacto de Imagen
         uses: actions/upload-artifact@v4
@@ -450,16 +452,16 @@ jobs:
             --create-namespace \
             --set backend.image.repository=${{ env.DOCKER_IMAGE }} \
             --set backend.image.tag=${{ github.sha }} \
+            --set backend.image.pullPolicy=Never \
             --set frontend.image.repository=notes-frontend \
-            --set frontend.image.tag=${{ github.sha }}
+            --set frontend.image.tag=${{ github.sha }} \
+            --set frontend.image.pullPolicy=Never
 
           echo "Esperando a que todos los pods de la aplicación estén listos..."
-          # Si falla al levantar, atrapamos el error, imprimimos el estado de los pods y cortamos
-          kubectl wait --for=condition=available deployment --all -n ${{ env.K8S_NAMESPACE }} --timeout=120s || {
-            echo "ERROR: La aplicación no logró arrancar. Estado de los pods:"
+          kubectl wait --for=condition=available deployment \
+            --all -n ${{ env.K8S_NAMESPACE }} --timeout=120s || {
+            echo "ERROR: La app no arrancó. Estado de pods:"
             kubectl get pods -n ${{ env.K8S_NAMESPACE }}
-            echo "EVENTOS DEL FRONTEND:"
-            kubectl describe pods -l app=frontend -n ${{ env.K8S_NAMESPACE }}
             exit 1
           }
 
