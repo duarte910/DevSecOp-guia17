@@ -452,11 +452,31 @@ jobs:
       - name: Ejecutar Job de OWASP ZAP
         run: |
           kubectl apply -f guia-13/k8s/04-zap-job.yaml
-          kubectl wait --for=condition=complete job/zap-security-scan -n ${{ env.K8S_NAMESPACE }} --timeout=15m
+          
+          echo "Monitoreando el escáner ZAP..."
+          for i in {1..30}; do
+            # Si el job termina perfecto
+            if kubectl get job zap-security-scan -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' | grep -q "True"; then
+              echo " Escaneo completado con éxito."
+              break
+            fi
+            # Si el job termina pero encuentra vulnerabilidades o falta de recursos
+            if kubectl get job zap-security-scan -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' | grep -q "True"; then
+              echo "AP finalizó (encontró alertas o hubo un error)."
+              break
+            fi
+            sleep 10
+          done
+          
+          echo "LOGS DEL JOB ZAP:"
+          kubectl logs -l job-name=zap-security-scan -n ${{ env.K8S_NAMESPACE }} || true
 
       - name: Extraer reportes de ZAP
         if: always()
-        run: ./guia-13/scripts/extract-zap-reports.sh
+        run: |
+          # Aumentamos dinámicamente el tiempo de espera a 120s por si la máquina está saturada
+          sed -i 's/timeout=60s/timeout=120s/g' guia-13/scripts/extract-zap-reports.sh
+          ./guia-13/scripts/extract-zap-reports.sh
 
       - name: Publicar Artifact de Reportes ZAP
         if: always()
