@@ -141,11 +141,12 @@ jobs:
       - name: Compilar imagen Docker
         run: |
           docker build -t ${{ env.DOCKER_IMAGE }}:${{ github.sha }} ./devops-tp12/app/backend
+          docker build -t notes-frontend:${{ github.sha }} ./devops-tp12/app/frontend
 
       - name: Exportar imagen a tarball efímero
         run: |
           mkdir -p build-artifacts
-          docker save ${{ env.DOCKER_IMAGE }}:${{ github.sha }} -o build-artifacts/app-image.tar
+          docker save ${{ env.DOCKER_IMAGE }}:${{ github.sha }} notes-frontend:${{ github.sha }} -o build-artifacts/app-image.tar
 
       - name: Publicar Artefacto de Imagen
         uses: actions/upload-artifact@v4
@@ -437,14 +438,20 @@ jobs:
         run: k3d cluster create zap-cluster -p "18080:80@loadbalancer" --wait
 
       - name: Importar imagen al clúster k3d
-        run: k3d image import ${{ env.DOCKER_IMAGE }}:${{ github.sha }} -c zap-cluster
+        run: |
+          k3d image import ${{ env.DOCKER_IMAGE }}:${{ github.sha }} -c zap-cluster
+          k3d image import notes-frontend:${{ github.sha }} -c zap-cluster
 
       - name: Desplegar aplicación con Helm
         run: |
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} devops-tp12/chart \
             -f devops-tp12/values-local.yaml \
             --namespace ${{ env.K8S_NAMESPACE }} \
-            --create-namespace
+            --create-namespace \
+            --set backend.image.repository=${{ env.DOCKER_IMAGE }} \
+            --set backend.image.tag=${{ github.sha }} \
+            --set frontend.image.repository=notes-frontend \
+            --set frontend.image.tag=${{ github.sha }}
 
           echo "Esperando a que todos los pods de la aplicación estén listos..."
           # Si falla al levantar, atrapamos el error, imprimimos el estado de los pods y cortamos
