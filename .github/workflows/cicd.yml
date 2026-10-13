@@ -141,11 +141,14 @@ jobs:
       - name: Compilar imagen Docker
         run: |
           docker build -t ${{ env.DOCKER_IMAGE }}:${{ github.sha }} ./devops-tp12/app/backend
+          docker build -t notes-frontend:${{ github.sha }} ./devops-tp12/app/frontend
 
       - name: Exportar imagen a tarball efímero
         run: |
           mkdir -p build-artifacts
-          docker save ${{ env.DOCKER_IMAGE }}:${{ github.sha }} -o build-artifacts/app-image.tar
+          docker save ${{ env.DOCKER_IMAGE }}:${{ github.sha }} \
+            notes-frontend:${{ github.sha }} \
+            -o build-artifacts/app-image.tar
 
       - name: Publicar Artefacto de Imagen
         uses: actions/upload-artifact@v4
@@ -407,11 +410,110 @@ jobs:
           head -n 35 trivy-low-medium-report.txt || echo "Sin vulnerabilidades menores." >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
+  # ── FASE 2: OWASP ZAP DAST SCAN (TP13C) ─────────────────
+  dast-zap-scan:
+    name: "Fase 2: OWASP ZAP (DAST)"
+    runs-on: ubuntu-latest
+    needs: [build-and-package]
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Descargar Artefacto de Imagen
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-artifact
+          path: build-artifacts
+
+      - name: Cargar imagen Docker compilada de Fase 1
+        run: docker load -i build-artifacts/app-image.tar
+
+      - name: Instalar k3d
+        run: curl --fail --silent https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+
+      - name: Instalar Helm CLI
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.13.0'
+
+      - name: Crear clúster efímero de pruebas
+        run: k3d cluster create zap-cluster -p "18080:80@loadbalancer" --wait
+
+      - name: Importar imagen al clúster k3d
+        run: |
+          k3d image import ${{ env.DOCKER_IMAGE }}:${{ github.sha }} -c zap-cluster
+          k3d image import notes-frontend:${{ github.sha }} -c zap-cluster
+
+      - name: Desplegar aplicación con Helm
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} devops-tp12/chart \
+            -f devops-tp12/values-local.yaml \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --create-namespace \
+            --set backend.image.repository=${{ env.DOCKER_IMAGE }} \
+            --set backend.image.tag=${{ github.sha }} \
+            --set backend.image.pullPolicy=Never \
+            --set frontend.image.repository=notes-frontend \
+            --set frontend.image.tag=${{ github.sha }} \
+            --set frontend.image.pullPolicy=Never
+
+          echo "Esperando a que todos los pods de la aplicación estén listos..."
+          kubectl wait --for=condition=available deployment \
+            --all -n ${{ env.K8S_NAMESPACE }} --timeout=120s || {
+            echo "ERROR: La app no arrancó. Estado de pods:"
+            kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+            exit 1
+          }
+
+          # Esperamos a que los pods levanten
+          kubectl rollout status deployment -n ${{ env.K8S_NAMESPACE }} --timeout=90s || true
+
+      - name: Ejecutar Job de OWASP ZAP
+        run: |
+          kubectl apply -f guia-13/k8s/04-zap-job.yaml
+
+          echo "onitoreando el escáner ZAP..."
+          for i in {1..30}; do
+            STATUS_C=$(kubectl get job zap-security-scan -n ${{ env.K8S_NAMESPACE }} \
+              -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}')
+
+            STATUS_F=$(kubectl get job zap-security-scan -n ${{ env.K8S_NAMESPACE }} \
+              -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')
+
+            if echo "$STATUS_C" | grep -q "True"; then
+              echo "Escaneo completado con éxito."
+              break
+            fi
+
+            if echo "$STATUS_F" | grep -q "True"; then
+              echo "AP finalizó (encontró alertas o hubo un error)."
+              break
+            fi
+            sleep 10
+          done
+
+          echo "LOGS DEL JOB ZAP:"
+          kubectl logs -l job-name=zap-security-scan -n ${{ env.K8S_NAMESPACE }} || true
+
+      - name: Extraer reportes de ZAP
+        if: always()
+        run: |
+          sed -i 's/timeout=60s/timeout=120s/g' guia-13/scripts/extract-zap-reports.sh
+          ./guia-13/scripts/extract-zap-reports.sh
+
+      - name: Publicar Artifact de Reportes ZAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-zap-reports
+          path: guia-13/reportes/
+
   # ── FASE 3: RELEASE & DEPLOY ────────────────────────────
   deploy-k8s-helm:
     name: "Fase 3: Release & Deploy Helm K8s"
     runs-on: ubuntu-latest
     needs:
+      - dast-zap-scan
       - build-and-package
       - trivy-andon-cord
       - trivy-audit-report
