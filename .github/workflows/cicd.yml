@@ -439,12 +439,11 @@ jobs:
       - name: Importar imagen al clúster k3d
         run: k3d image import ${{ env.DOCKER_IMAGE }}:${{ github.sha }} -c zap-cluster
 
-      - name: Desplegar aplicación con Helm (Estilo TP17)
+      - name: Desplegar aplicación con Helm
         run: |
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} devops-tp12/chart \
             -f devops-tp12/values-local.yaml \
-            --namespace ${{ env.K8S_NAMESPACE }} \
-            --create-namespace
+            --namespace ${{ env.K8S_NAMESPACE }}
 
           # Esperamos a que los pods levanten
           kubectl rollout status deployment -n ${{ env.K8S_NAMESPACE }} --timeout=90s || true
