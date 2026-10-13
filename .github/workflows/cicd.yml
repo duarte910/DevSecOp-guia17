@@ -446,6 +446,16 @@ jobs:
             --namespace ${{ env.K8S_NAMESPACE }} \
             --create-namespace
 
+          echo "Esperando a que todos los pods de la aplicación estén listos..."
+          # Si falla al levantar, atrapamos el error, imprimimos el estado de los pods y cortamos
+          kubectl wait --for=condition=available deployment --all -n ${{ env.K8S_NAMESPACE }} --timeout=120s || {
+            echo "ERROR: La aplicación no logró arrancar. Estado de los pods:"
+            kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+            echo "EVENTOS DEL FRONTEND:"
+            kubectl describe pods -l app=frontend -n ${{ env.K8S_NAMESPACE }}
+            exit 1
+          }
+
           # Esperamos a que los pods levanten
           kubectl rollout status deployment -n ${{ env.K8S_NAMESPACE }} --timeout=90s || true
 
@@ -453,7 +463,7 @@ jobs:
         run: |
           kubectl apply -f guia-13/k8s/04-zap-job.yaml
 
-          echo "⏱️ Monitoreando el escáner ZAP..."
+          echo "onitoreando el escáner ZAP..."
           for i in {1..30}; do
             STATUS_C=$(kubectl get job zap-security-scan -n ${{ env.K8S_NAMESPACE }} \
               -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}')
@@ -462,18 +472,18 @@ jobs:
               -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')
 
             if echo "$STATUS_C" | grep -q "True"; then
-              echo "✅ Escaneo completado con éxito."
+              echo "Escaneo completado con éxito."
               break
             fi
 
             if echo "$STATUS_F" | grep -q "True"; then
-              echo "⚠️ ZAP finalizó (encontró alertas o hubo un error)."
+              echo "AP finalizó (encontró alertas o hubo un error)."
               break
             fi
             sleep 10
           done
 
-          echo "📋 LOGS DEL JOB ZAP:"
+          echo "LOGS DEL JOB ZAP:"
           kubectl logs -l job-name=zap-security-scan -n ${{ env.K8S_NAMESPACE }} || true
 
       - name: Extraer reportes de ZAP
