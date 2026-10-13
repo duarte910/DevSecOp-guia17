@@ -407,11 +407,70 @@ jobs:
           head -n 35 trivy-low-medium-report.txt || echo "Sin vulnerabilidades menores." >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
+  # ── FASE 2: OWASP ZAP DAST SCAN (TP13C) ─────────────────
+  dast-zap-scan:
+    name: "Fase 2: OWASP ZAP (DAST)"
+    runs-on: ubuntu-latest
+    needs: [build-and-package]
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Descargar Artefacto de Imagen
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-artifact
+          path: build-artifacts
+
+      - name: Cargar imagen Docker compilada de Fase 1
+        run: docker load -i build-artifacts/app-image.tar
+
+      - name: Instalar k3d
+        run: curl --fail --silent https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+
+      - name: Instalar Helm CLI
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.13.0'
+
+      - name: Crear clúster efímero de pruebas
+        run: k3d cluster create zap-cluster -p "18080:80@loadbalancer" --wait
+
+      - name: Importar imagen al clúster k3d
+        run: k3d image import ${{ env.DOCKER_IMAGE }}:${{ github.sha }} -c zap-cluster
+
+      - name: Desplegar aplicación con Helm (Estilo TP17)
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} devops-tp12/chart \
+            -f devops-tp12/values-local.yaml \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --create-namespace
+          
+          # Esperamos a que los pods levanten
+          kubectl rollout status deployment -n ${{ env.K8S_NAMESPACE }} --timeout=90s || true
+
+      - name: Ejecutar Job de OWASP ZAP
+        run: |
+          kubectl apply -f guia-13/k8s/04-zap-job.yaml
+          kubectl wait --for=condition=complete job/zap-security-scan -n ${{ env.K8S_NAMESPACE }} --timeout=15m
+
+      - name: Extraer reportes de ZAP
+        if: always()
+        run: ./guia-13/scripts/extract-zap-reports.sh
+
+      - name: Publicar Artifact de Reportes ZAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-zap-reports
+          path: reportes/
+
   # ── FASE 3: RELEASE & DEPLOY ────────────────────────────
   deploy-k8s-helm:
     name: "Fase 3: Release & Deploy Helm K8s"
     runs-on: ubuntu-latest
     needs:
+      - dast-zap-scan
       - build-and-package
       - trivy-andon-cord
       - trivy-audit-report
