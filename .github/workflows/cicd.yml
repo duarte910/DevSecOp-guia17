@@ -445,7 +445,7 @@ jobs:
             -f devops-tp12/values-local.yaml \
             --namespace ${{ env.K8S_NAMESPACE }} \
             --create-namespace
-          
+
           # Esperamos a que los pods levanten
           kubectl rollout status deployment -n ${{ env.K8S_NAMESPACE }} --timeout=90s || true
 
